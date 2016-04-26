@@ -63,11 +63,15 @@ import org.apache.cxf.jaxrs.client.WebClient;
 import org.apache.cxf.jaxws.DispatchImpl;
 import org.apache.cxf.transport.http.HTTPConduit;
 import org.apache.cxf.transport.http.HTTPConduitFactory;
+import org.apache.cxf.transport.http.asyncclient.AsyncHTTPConduit;
 import org.apache.cxf.transport.http.asyncclient.AsyncHTTPConduitFactory;
 import org.apache.cxf.transports.http.configuration.HTTPClientPolicy;
 import org.apache.cxf.ws.security.SecurityConstants;
 import org.apache.cxf.ws.security.wss4j.WSS4JInInterceptor;
 import org.apache.cxf.ws.security.wss4j.WSS4JOutInterceptor;
+import org.apache.http.auth.Credentials;
+import org.apache.http.auth.NTCredentials;
+import org.apache.http.impl.nio.client.DefaultHttpAsyncClient;
 import org.ietf.jgss.GSSCredential;
 import org.teiid.OAuthCredential;
 import org.teiid.core.util.ArgCheck;
@@ -161,9 +165,17 @@ public class WSConnectionImpl extends BasicConnection implements WSConnection {
                 // see to use patch
                 // http://stackoverflow.com/questions/32067687/how-to-use-patch-method-in-cxf
 				Bus bus = getBus(this.configFile);
-                if (httpMethod.equals("PATCH")) {
-                    bus.setProperty("use.async.http.conduit", Boolean.TRUE);
+				
+				Object ntcredentials = this.requestContext.get(Credentials.class.getName());
+                if (httpMethod.equals("PATCH") || (ntcredentials != null && ntcredentials instanceof NTCredentials)) {
+                    bus.setProperty(AsyncHTTPConduit.USE_ASYNC, Boolean.TRUE);
                     bus.setExtension(new AsyncHTTPConduitFactory(bus), HTTPConduitFactory.class);
+                    
+                    if (ntcredentials != null && ntcredentials instanceof NTCredentials) {
+                    	HTTPClientPolicy clientPolicy = WebClient.getConfig(this.client).getHttpConduit().getClient();
+        				clientPolicy.setAutoRedirect(true);
+        				clientPolicy.setAllowChunking(false);
+                    }
                 }
                 this.client = createWebClient(this.endpoint, bus);
                 
@@ -192,6 +204,7 @@ public class WSConnectionImpl extends BasicConnection implements WSConnection {
 				}
 				
 				HTTPClientPolicy clientPolicy = WebClient.getConfig(this.client).getHttpConduit().getClient();
+				
 				Long timeout = (Long) this.requestContext.get(RECEIVE_TIMEOUT); 
 				if (timeout != null) {
 					clientPolicy.setReceiveTimeout(timeout);
@@ -456,6 +469,27 @@ public class WSConnectionImpl extends BasicConnection implements WSConnection {
             if (!credentialFound) {
                 throw new WebServiceException(WSManagedConnectionFactory.UTIL.getString("no_oauth_credential")); //$NON-NLS-1$
             }
+        }
+        else if (this.mcf.getAsSecurityType() == WSManagedConnectionFactory.SecurityType.NTLM) {
+        	String domain = null;
+        	String userName = this.mcf.getAuthUserName();
+			String password = this.mcf.getAuthPassword();
+
+			// if security-domain is specified and caller identity is used; then use
+			// credentials from subject
+			Subject subject = ConnectionContext.getSubject();
+			if (subject != null) {
+				userName = ConnectionContext.getUserName(subject, this.mcf, userName);
+				password = ConnectionContext.getPassword(subject, this.mcf, userName, password);
+			}
+			
+			if (userName.indexOf("\\") > -1) {
+				String[] parts = userName.split("\\\\");
+				domain = parts[0];
+				userName = parts[1];
+			}
+			
+			dispatch.getRequestContext().put(Credentials.class.getName(), new NTCredentials(userName, password, null, domain));	
         }
 
 		if (this.mcf.getRequestTimeout() != null){
